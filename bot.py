@@ -97,5 +97,5 @@ def temp(m):
     except Exception as e:
         bot.reply_to(m, f"⚠️ Blad czujnika: {e}")
 
-bot.send_message(CHAT_ID, "🟢 Bot uruchomiony")
+bot.send_message(CHAT_ID, "🟢 Płytka uruchomiona")
 bot.infinity_polling()
