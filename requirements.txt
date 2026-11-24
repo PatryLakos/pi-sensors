@@ -1,0 +1,3 @@
+pyTelegramBotAPI
+bmp280
+smbus2
