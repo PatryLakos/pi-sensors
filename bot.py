@@ -72,7 +72,7 @@ def status_text():
 @bot.message_handler(commands=["start", "ping"])
 def ping(m):
     if m.chat.id == CHAT_ID:
-        bot.reply_to(m, "✅ Dziaaaaalam! Komendy: /status /temp /ping")
+        bot.reply_to(m, "✅ Dzialam! Komendy: /status /temp /ping")
 
 @bot.message_handler(commands=["status"])
 def status(m):
