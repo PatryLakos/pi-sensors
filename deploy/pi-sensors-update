@@ -1,0 +1,70 @@
+#!/bin/bash
+# Pull-based deploy: wdraza tylko commity, ktore przeszly CI w GitHub Actions.
+set -euo pipefail
+
+REPO=/home/patryk/pi-sensors
+RUN_AS=patryk
+GH_REPO=PatryLakos/pi-sensors
+FAILED_FILE=/home/patryk/.last_failed_sha
+cd "$REPO"
+
+# sprawdz, czy na GitHubie jest cos nowego
+runuser -u "$RUN_AS" -- git fetch --quiet origin main
+LOCAL=$(runuser -u "$RUN_AS" -- git rev-parse HEAD)
+REMOTE=$(runuser -u "$RUN_AS" -- git rev-parse origin/main)
+
+if [ "$LOCAL" = "$REMOTE" ]; then
+    exit 0   # nic nowego
+fi
+
+source .env
+
+notify() {
+    curl -s -o /dev/null "https://api.telegram.org/bot${TOKEN}/sendMessage" \
+        --data-urlencode "chat_id=${CHAT_ID}" \
+        --data-urlencode "text=$1"
+}
+
+# zapytaj GitHuba o wynik CI dla tego commita
+CI=$(curl -fsS -H "Accept: application/vnd.github+json" \
+    "https://api.github.com/repos/${GH_REPO}/commits/${REMOTE}/check-runs" \
+  | python3 -c '
+import json, sys
+runs = json.load(sys.stdin).get("check_runs", [])
+if not runs or any(r["status"] != "completed" for r in runs):
+    print("pending")
+elif all(r["conclusion"] in ("success", "skipped", "neutral") for r in runs):
+    print("success")
+else:
+    print("failure")
+') || CI=pending   # brak internetu / limit API -> sprobuj za 2 min
+
+MSG=$(runuser -u "$RUN_AS" -- git log -1 --pretty='%h %s' "$REMOTE")
+
+case "$CI" in
+    pending)
+        echo "CI dla $REMOTE jeszcze trwa - czekam"
+        exit 0
+        ;;
+    failure)
+        # powiadom tylko raz o danym commicie
+        if [ "$(cat "$FAILED_FILE" 2>/dev/null)" != "$REMOTE" ]; then
+            echo "$REMOTE" > "$FAILED_FILE"
+            notify "❌ CI nie przeszlo - NIE wdrazam: ${MSG}"
+        fi
+        echo "CI failed dla $REMOTE - pomijam"
+        exit 0
+        ;;
+esac
+
+echo "Nowa wersja (CI OK): $LOCAL -> $REMOTE"
+
+# pobierz nowa wersje i zainstaluj biblioteki
+runuser -u "$RUN_AS" -- git reset --hard origin/main
+runuser -u "$RUN_AS" -- ./venv/bin/pip install --quiet -r requirements.txt
+
+# restart bota
+systemctl restart sensors-bot
+
+notify "🚀 Wdrożono (CI ✅): ${MSG}"
+echo "Wdrozono: $MSG"

@@ -1,0 +1,7 @@
+line-length = 120
+
+[lint]
+# E/W = styl (pycodestyle), F = prawdziwe bledy (pyflakes: literowki, nieuzywane importy, niezdefiniowane zmienne)
+select = ["E", "F", "W"]
+# pozwalamy na kilka importow w jednej linii (import os, time, ...)
+ignore = ["E401", "W292"]

@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    name: Lint i testy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Pobranie kodu
+        uses: actions/checkout@v4
+
+      - name: Python 3.13 (ta sama wersja co na Pi)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Instalacja ruff
+        run: pip install ruff
+
+      - name: Lint (ruff)
+        run: ruff check .
+
+      - name: Sprawdzenie skladni Pythona
+        run: python -m py_compile bot.py
+
+      - name: Sprawdzenie dashboardu Grafany (JSON)
+        if: hashFiles('grafana/*.json') != ''
+        run: |
+          for f in grafana/*.json; do
+            python -m json.tool "$f" > /dev/null && echo "OK: $f"
+          done
