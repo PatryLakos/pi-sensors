@@ -191,11 +191,12 @@ def temp(m):
     except Exception as e:
         bot.reply_to(m, f"⚠️ Blad czujnika: {e}")
 # --- Wykresy na Telegram (/wykres) ---
+# (tytul, metryka, jednostka, min. margines skali, miejsca po przecinku, sensowny zakres)
 CHARTS = [
-    ("Temperatura w pokoju (°C)", "room_temperature_celsius"),
-    ("Wilgotność (%)", "room_humidity_percent"),
-    ("Ciśnienie (hPa)", "room_pressure_hpa"),
-    ("Temperatura CPU (°C)", "pi_cpu_temperature_celsius"),
+    ("Temperatura w pokoju", "room_temperature_celsius", "°C", 0.2, 1, (-10, 50)),
+    ("Wilgotność", "room_humidity_percent", "%", 1, 0, (0, 100)),
+    ("Ciśnienie", "room_pressure_hpa", "hPa", 1, 0, (900, 1100)),
+    ("Temperatura CPU", "pi_cpu_temperature_celsius", "°C", 0.5, 1, (0, 100)),
 ]
 
 def prom_range(query, days):
@@ -217,22 +218,41 @@ def make_chart(days):
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     import matplotlib.dates as mdates
+    from matplotlib.ticker import MaxNLocator, AutoMinorLocator, ScalarFormatter
 
-    fig, axes = plt.subplots(len(CHARTS), 1, figsize=(8, 10), sharex=True)
-    for ax, (title, q) in zip(axes, CHARTS):
+    fig, axes = plt.subplots(len(CHARTS), 1, figsize=(9, 12), sharex=True)
+    for ax, (title, q, unit, step, dec, (lo, hi)) in zip(axes, CHARTS):
         x, y = prom_range(q, days)
-        ax.set_title(title, fontsize=10)
-        ax.grid(alpha=0.3)
-        if x:
-            ax.plot(x, y, linewidth=1.2)
-        else:
+        # odrzucamy bledne odczyty (np. 740 hPa), zeby nie psuly skali
+        pts = [(a, b) for a, b in zip(x, y) if lo <= b <= hi]
+        ax.grid(which="major", alpha=0.4)
+        ax.grid(which="minor", alpha=0.15)
+        if not pts:
+            ax.set_title(f"{title} ({unit})", fontsize=10)
             ax.text(0.5, 0.5, "brak danych", ha="center", va="center", transform=ax.transAxes)
+            continue
+        x, y = zip(*pts)
+        ax.plot(x, y, linewidth=1.3)
+        ax.set_title(
+            f"{title} ({unit})  –  teraz {y[-1]:.{dec}f}, "
+            f"min {min(y):.{dec}f}, max {max(y):.{dec}f}, sr. {sum(y)/len(y):.{dec}f}",
+            fontsize=10)
+        # skala dopasowana do danych z malym marginesem
+        margin = max(step / 2, (max(y) - min(y)) * 0.1)
+        ax.set_ylim(min(y) - margin, max(y) + margin)
+        # gesta, czytelna siatka dopasowana do zakresu danych (ok. 8 podzialek)
+        ax.yaxis.set_major_locator(MaxNLocator(nbins=8, steps=[1, 2, 2.5, 5, 10]))
+        ax.yaxis.set_minor_locator(AutoMinorLocator(5))
+        sf = ScalarFormatter(useOffset=False)
+        sf.set_scientific(False)
+        ax.yaxis.set_major_formatter(sf)
     fmt = "%H:%M" if days <= 1 else "%d.%m %H:%M"
     axes[-1].xaxis.set_major_formatter(mdates.DateFormatter(fmt))
+    axes[-1].xaxis.set_minor_locator(AutoMinorLocator(4))
     fig.autofmt_xdate()
     fig.tight_layout()
     buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=100)
+    fig.savefig(buf, format="png", dpi=110)
     plt.close(fig)
     buf.seek(0)
     return buf
