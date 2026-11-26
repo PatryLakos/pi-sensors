@@ -145,12 +145,41 @@ def status_text():
     )
 
 # --- Komendy ---
-@bot.message_handler(commands=["start", "ping"])
+HELP_TEXT = """📖 Wszystkie komendy
+
+🌡 Pomiary
+/temp – temperatura, wilgotność i ciśnienie teraz
+/status – stan Raspberry Pi (CPU, RAM, karta, zasilanie)
+
+📈 Wykresy
+/wykres – ostatnie 7 dni
+/wykres 1 – ostatnia doba
+/wykres 30 – ostatni miesiąc (maksimum)
+
+📋 Raporty
+/raport – ostatnie 10 h (tak jak rano o 8:00)
+/raport 24 – ostatnia doba
+/raport 168 – ostatni tydzień
+
+🚶 Czujnik ruchu
+/monitor_on – włącz powiadomienia o ruchu
+/monitor_off – wyłącz powiadomienia o ruchu
+
+⚙️ Inne
+/ping – sprawdź, czy bot działa
+/help – ta lista
+
+☀️ Raport z nocy przychodzi sam codziennie o 8:00."""
+
+@bot.message_handler(commands=["start", "help"])
+def help_cmd(m):
+    if m.chat.id == CHAT_ID:
+        bot.reply_to(m, HELP_TEXT)
+
+@bot.message_handler(commands=["ping"])
 def ping(m):
     if m.chat.id == CHAT_ID:
-        bot.reply_to(m, "✅ Dzialam! Komendy:\n"
-                        "/status /temp /wykres /raport\n"
-                        "/monitor_on /monitor_off")
+        bot.reply_to(m, "✅ Działam! Wszystkie komendy: /help")
 
 @bot.message_handler(commands=["monitor_off"])
 def monitor_off(m):
