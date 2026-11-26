@@ -7,12 +7,30 @@ TOKEN = os.environ["TOKEN"]
 CHAT_ID = int(os.environ["CHAT_ID"])
 bot = telebot.TeleBot(TOKEN)
 
+# --- Stan czujnika ruchu (zapamietywany w pliku) ---
+STATE_FILE = "/home/patryk/.monitor_state"
+
+def load_monitor():
+    try:
+        with open(STATE_FILE) as f:
+            return f.read().strip() != "off"
+    except FileNotFoundError:
+        return True
+
+def save_monitor(on):
+    with open(STATE_FILE, "w") as f:
+        f.write("on" if on else "off")
+
+monitoring = load_monitor()
+
 # --- Czujnik ruchu (HC-SR501 na GPIO17) ---
 pir = MotionSensor(17)
 last = 0
 
 def on_motion():
     global last
+    if not monitoring:
+        return
     if time.time() - last > 60:   # max 1 powiadomienie na minute
         last = time.time()
         bot.send_message(CHAT_ID, "🚶 Wykryto ruch!")
@@ -21,11 +39,9 @@ pir.when_motion = on_motion
 
 # --- Stan Raspberry Pi ---
 def status_text():
-    # temperatura procesora
     with open("/sys/class/thermal/thermal_zone0/temp") as f:
         cpu_temp = int(f.read()) / 1000
 
-    # pamiec RAM
     mem = {}
     with open("/proc/meminfo") as f:
         for line in f:
@@ -34,22 +50,18 @@ def status_text():
     ram_total = mem["MemTotal"] / 1024
     ram_used = ram_total - mem["MemAvailable"] / 1024
 
-    # karta SD
     disk = shutil.disk_usage("/")
     disk_used = disk.used / 1024**3
     disk_total = disk.total / 1024**3
 
-    # czas dzialania
     with open("/proc/uptime") as f:
         up = int(float(f.read().split()[0]))
     days, rest = divmod(up, 86400)
     hours, rest = divmod(rest, 3600)
     minutes = rest // 60
 
-    # obciazenie CPU (srednia z 1 min)
     load = os.getloadavg()[0]
 
-    # zasilanie - czy bylo za niskie napiecie
     try:
         out = subprocess.run(["vcgencmd", "get_throttled"],
                              capture_output=True, text=True).stdout
@@ -58,6 +70,8 @@ def status_text():
     except Exception:
         power = "?"
 
+    motion = "🔔 wlaczony" if monitoring else "🔕 wylaczony"
+
     return (
         f"🖥 Raspberry Pi\n"
         f"🌡 CPU: {cpu_temp:.1f} °C\n"
@@ -65,14 +79,35 @@ def status_text():
         f"🧠 RAM: {ram_used:.0f} / {ram_total:.0f} MB\n"
         f"💾 Karta: {disk_used:.1f} / {disk_total:.1f} GB\n"
         f"⏱ Uptime: {days}d {hours}h {minutes}min\n"
-        f"🔌 Zasilanie: {power}"
+        f"🔌 Zasilanie: {power}\n"
+        f"🚶 Czujnik ruchu: {motion}"
     )
 
 # --- Komendy ---
 @bot.message_handler(commands=["start", "ping"])
 def ping(m):
     if m.chat.id == CHAT_ID:
-        bot.reply_to(m, "✅ Dzialam! Komendy: /status /temp /ping")
+        bot.reply_to(m, "✅ Dzialam! Komendy:\n"
+                        "/status /temp\n"
+                        "/monitor_on /monitor_off")
+
+@bot.message_handler(commands=["monitor_off"])
+def monitor_off(m):
+    global monitoring
+    if m.chat.id != CHAT_ID:
+        return
+    monitoring = False
+    save_monitor(False)
+    bot.reply_to(m, "🔕 Czujnik ruchu wylaczony.\nWlaczysz go komenda /monitor_on")
+
+@bot.message_handler(commands=["monitor_on"])
+def monitor_on(m):
+    global monitoring
+    if m.chat.id != CHAT_ID:
+        return
+    monitoring = True
+    save_monitor(True)
+    bot.reply_to(m, "🔔 Czujnik ruchu wlaczony.")
 
 @bot.message_handler(commands=["status"])
 def status(m):
@@ -97,5 +132,5 @@ def temp(m):
     except Exception as e:
         bot.reply_to(m, f"⚠️ Blad czujnika: {e}")
 
-bot.send_message(CHAT_ID, "🟢 Płytka uruchomiona")
+bot.send_message(CHAT_ID, "🟢 Bot uruchomiony")
 bot.infinity_polling()
