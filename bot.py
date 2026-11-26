@@ -1,12 +1,22 @@
-import os, time, shutil, subprocess, telebot
+import os, time, shutil, subprocess, threading, telebot
 from gpiozero import MotionSensor
 from smbus2 import SMBus
 from bmp280 import BMP280
 from bme280 import BME280
+from prometheus_client import Gauge, Counter, start_http_server
 
 TOKEN = os.environ["TOKEN"]
 CHAT_ID = int(os.environ["CHAT_ID"])
 bot = telebot.TeleBot(TOKEN)
+
+# --- Metryki dla Prometheusa ---
+ROOM_T = Gauge("room_temperature_celsius", "Temperatura w pokoju")
+ROOM_H = Gauge("room_humidity_percent", "Wilgotnosc w pokoju")
+ROOM_P = Gauge("room_pressure_hpa", "Cisnienie atmosferyczne")
+SENSOR_UP = Gauge("room_sensor_up", "1 gdy odczyt czujnika sie udal")
+CPU_T = Gauge("pi_cpu_temperature_celsius", "Temperatura procesora Pi")
+MOTION_TOTAL = Counter("motion_events_total", "Liczba wykryc ruchu")
+MOTION_ACTIVE = Gauge("motion_active", "1 gdy czujnik widzi ruch")
 
 # --- Stan czujnika ruchu (zapamietywany w pliku) ---
 STATE_FILE = "/home/patryk/.monitor_state"
@@ -30,32 +40,65 @@ last = 0
 
 def on_motion():
     global last
+    MOTION_TOTAL.inc()
+    MOTION_ACTIVE.set(1)
     if not monitoring:
         return
     if time.time() - last > 60:   # max 1 powiadomienie na minute
         last = time.time()
         bot.send_message(CHAT_ID, "🚶 Wykryto ruch!")
 
+def on_no_motion():
+    MOTION_ACTIVE.set(0)
+
 pir.when_motion = on_motion
+pir.when_no_motion = on_no_motion
 
 # --- Czujnik temperatury (BME280 lub BMP280 na I2C, adres 0x76) ---
+i2c_lock = threading.Lock()   # zeby bot i metryki nie czytaly naraz
+
 def read_climate():
-    bus = SMBus(1)
-    chip = bus.read_byte_data(0x76, 0xD0)   # 0x60 = BME280, 0x58 = BMP280
-    if chip == 0x60:
-        s = BME280(i2c_dev=bus)
-        s.get_temperature()
-        time.sleep(1)                        # pierwszy odczyt bywa zly
-        return s.get_temperature(), s.get_pressure(), s.get_humidity()
-    s = BMP280(i2c_dev=bus)
-    s.get_temperature()
-    time.sleep(0.2)
-    return s.get_temperature(), s.get_pressure(), None
+    with i2c_lock:
+        bus = SMBus(1)
+        try:
+            chip = bus.read_byte_data(0x76, 0xD0)   # 0x60 = BME280, 0x58 = BMP280
+            if chip == 0x60:
+                s = BME280(i2c_dev=bus)
+                s.get_temperature()
+                time.sleep(1)                        # pierwszy odczyt bywa zly
+                return s.get_temperature(), s.get_pressure(), s.get_humidity()
+            s = BMP280(i2c_dev=bus)
+            s.get_temperature()
+            time.sleep(0.2)
+            return s.get_temperature(), s.get_pressure(), None
+        finally:
+            bus.close()
+
+def read_cpu_temp():
+    with open("/sys/class/thermal/thermal_zone0/temp") as f:
+        return int(f.read()) / 1000
+
+# --- Petla zbierajaca metryki co 30 s ---
+def metrics_loop():
+    while True:
+        try:
+            t, p, h = read_climate()
+            ROOM_T.set(t)
+            ROOM_P.set(p)
+            if h is not None:
+                ROOM_H.set(h)
+            SENSOR_UP.set(1)
+        except Exception:
+            SENSOR_UP.set(0)
+        try:
+            CPU_T.set(read_cpu_temp())
+        except Exception:
+            pass
+        time.sleep(30)
 
 # --- Stan Raspberry Pi ---
 def status_text():
-    with open("/sys/class/thermal/thermal_zone0/temp") as f:
-        cpu_temp = int(f.read()) / 1000
+    cpu_temp = read_cpu_temp()
 
     mem = {}
     with open("/proc/meminfo") as f:
@@ -145,6 +188,10 @@ def temp(m):
         bot.reply_to(m, msg)
     except Exception as e:
         bot.reply_to(m, f"⚠️ Blad czujnika: {e}")
+
+# --- Start ---
+start_http_server(8000, addr="127.0.0.1")   # metryki pod http://localhost:8000/metrics
+threading.Thread(target=metrics_loop, daemon=True).start()
 
 bot.send_message(CHAT_ID, "🟢 Bot uruchomiony")
 bot.infinity_polling()
