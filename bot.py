@@ -2,6 +2,7 @@ import os, time, shutil, subprocess, telebot
 from gpiozero import MotionSensor
 from smbus2 import SMBus
 from bmp280 import BMP280
+from bme280 import BME280
 
 TOKEN = os.environ["TOKEN"]
 CHAT_ID = int(os.environ["CHAT_ID"])
@@ -36,6 +37,20 @@ def on_motion():
         bot.send_message(CHAT_ID, "🚶 Wykryto ruch!")
 
 pir.when_motion = on_motion
+
+# --- Czujnik temperatury (BME280 lub BMP280 na I2C, adres 0x76) ---
+def read_climate():
+    bus = SMBus(1)
+    chip = bus.read_byte_data(0x76, 0xD0)   # 0x60 = BME280, 0x58 = BMP280
+    if chip == 0x60:
+        s = BME280(i2c_dev=bus)
+        s.get_temperature()
+        time.sleep(1)                        # pierwszy odczyt bywa zly
+        return s.get_temperature(), s.get_pressure(), s.get_humidity()
+    s = BMP280(i2c_dev=bus)
+    s.get_temperature()
+    time.sleep(0.2)
+    return s.get_temperature(), s.get_pressure(), None
 
 # --- Stan Raspberry Pi ---
 def status_text():
@@ -123,12 +138,11 @@ def temp(m):
     if m.chat.id != CHAT_ID:
         return
     try:
-        s = BMP280(i2c_dev=SMBus(1))
-        s.get_temperature()
-        time.sleep(0.2)
-        t = s.get_temperature()
-        p = s.get_pressure()
-        bot.reply_to(m, f"🌡 {t:.1f} °C\n🧭 {p:.0f} hPa")
+        t, p, h = read_climate()
+        msg = f"🌡 {t:.1f} °C\n🧭 {p:.0f} hPa"
+        if h is not None:
+            msg += f"\n💧 {h:.0f} %"
+        bot.reply_to(m, msg)
     except Exception as e:
         bot.reply_to(m, f"⚠️ Blad czujnika: {e}")
 

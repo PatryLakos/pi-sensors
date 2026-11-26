@@ -1,3 +1,4 @@
 pyTelegramBotAPI
 bmp280
 smbus2
+pimoroni-bme280
