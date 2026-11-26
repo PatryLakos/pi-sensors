@@ -160,6 +160,7 @@ HELP_TEXT = """📖 Wszystkie komendy
 /raport – ostatnie 10 h (tak jak rano o 8:00)
 /raport 24 – ostatnia doba
 /raport 168 – ostatni tydzień
+/tydzien – podsumowanie tygodnia z wykresem i porównaniem
 
 🚶 Czujnik ruchu
 /monitor_on – włącz powiadomienia o ruchu
@@ -169,7 +170,8 @@ HELP_TEXT = """📖 Wszystkie komendy
 /ping – sprawdź, czy bot działa
 /help – ta lista
 
-☀️ Raport z nocy przychodzi sam codziennie o 8:00."""
+☀️ Raport z nocy przychodzi sam codziennie o 8:00.
+📊 Podsumowanie tygodnia – w każdą niedzielę o 20:00."""
 
 @bot.message_handler(commands=["start", "help"])
 def help_cmd(m):
@@ -354,17 +356,86 @@ def morning_report(hours=NIGHT_HOURS):
         lines.append("\n🥶 W nocy bylo zimno - sprawdz okno albo grzejnik.")
     return "\n".join(lines)
 
+# --- Tygodniowe podsumowanie (niedziela 20:00) ---
+WEEKLY_DAY = 6      # 0 = poniedzialek ... 6 = niedziela
+WEEKLY_HOUR = 20
+
+def week_stat(func, metric_filter, ago=False):
+    off = " offset 7d" if ago else ""
+    return prom_query(f"{func}({metric_filter}[7d:5m]{off})")
+
+def compare(now, prev, unit, dec, more, less):
+    if now is None or prev is None:
+        return ""
+    d = now - prev
+    if round(d, dec) == 0:
+        return " (tak samo jak tydzien temu)"
+    word = more if d > 0 else less
+    return f" (o {abs(d):.{dec}f}{unit} {word} niz tydzien temu)"
+
+def weekly_summary():
+    temp = "(room_temperature_celsius > -10 < 50)"
+    hum = "(room_humidity_percent >= 0 <= 100)"
+    t_avg, t_avg_prev = week_stat("avg_over_time", temp), week_stat("avg_over_time", temp, ago=True)
+    t_min, t_max = week_stat("min_over_time", temp), week_stat("max_over_time", temp)
+    h_avg, h_avg_prev = week_stat("avg_over_time", hum), week_stat("avg_over_time", hum, ago=True)
+    moves = prom_query("sum(increase(motion_events_total[7d]))")
+    moves_prev = prom_query("sum(increase(motion_events_total[7d] offset 7d))")
+
+    lines = ["📊 Podsumowanie tygodnia", ""]
+    lines.append(f"🌡 Temperatura: srednio {fmt(t_avg)}"
+                 + compare(t_avg, t_avg_prev, " °C", 1, "cieplej", "chlodniej"))
+    lines.append(f"     min {fmt(t_min)}, max {fmt(t_max)}")
+    lines.append(f"💧 Wilgotnosc: srednio {fmt(h_avg, 0, ' %')}"
+                 + compare(h_avg, h_avg_prev, " pkt %", 0, "wyzej", "nizej"))
+
+    if moves is None:
+        lines.append("🚶 Ruch: brak danych")
+    else:
+        m_now = round(moves)
+        line = f"🚶 Ruch w pokoju: {m_now} razy"
+        if moves_prev is not None:
+            m_prev = round(moves_prev)
+            if m_prev > 0:
+                pct = (m_now - m_prev) / m_prev * 100
+                if abs(pct) < 5:
+                    line += " (podobnie jak tydzien temu)"
+                else:
+                    word = "czesciej" if pct > 0 else "rzadziej"
+                    line += f" (o {abs(pct):.0f}% {word} niz tydzien temu)"
+            else:
+                line += f" (tydzien temu: {m_prev})"
+        lines.append(line)
+
+    if t_avg_prev is None:
+        lines.append("\nℹ️ Porownanie pojawi sie, gdy zbierze sie wiecej niz tydzien danych.")
+    return "\n".join(lines)
+
+def send_weekly():
+    text = weekly_summary()
+    bot.send_chat_action(CHAT_ID, "upload_photo")
+    img = make_chart(7)
+    bot.send_photo(CHAT_ID, img, caption=text)
+
 def report_loop():
     # co 30 s sprawdzamy godzine; odporne na restarty i synchronizacje zegara
-    last_sent = None
+    last_daily = None
+    last_weekly = None
     while True:
         now = datetime.datetime.now(TZ)
-        if now.hour == REPORT_HOUR and now.minute < 10 and last_sent != now.date():
-            last_sent = now.date()
+        if now.hour == REPORT_HOUR and now.minute < 10 and last_daily != now.date():
+            last_daily = now.date()
             try:
                 bot.send_message(CHAT_ID, morning_report())
             except Exception as e:
                 print(f"Blad raportu: {e}", flush=True)
+        if (now.weekday() == WEEKLY_DAY and now.hour == WEEKLY_HOUR
+                and now.minute < 10 and last_weekly != now.date()):
+            last_weekly = now.date()
+            try:
+                send_weekly()
+            except Exception as e:
+                print(f"Blad podsumowania: {e}", flush=True)
         time.sleep(30)
 
 @bot.message_handler(commands=["raport"])
@@ -383,6 +454,15 @@ def raport(m):
         bot.reply_to(m, morning_report(hours))
     except Exception as e:
         bot.reply_to(m, f"⚠️ Nie udalo sie zrobic raportu: {e}")
+
+@bot.message_handler(commands=["tydzien"])
+def tydzien(m):
+    if m.chat.id != CHAT_ID:
+        return
+    try:
+        send_weekly()
+    except Exception as e:
+        bot.reply_to(m, f"⚠️ Nie udalo sie zrobic podsumowania: {e}")
 
 # --- Start ---
 start_http_server(8000, addr="127.0.0.1")   # metryki pod http://localhost:8000/metrics
