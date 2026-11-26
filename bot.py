@@ -1,5 +1,6 @@
 import os, io, json, time, shutil, subprocess, threading, datetime
 import urllib.request, urllib.parse
+from zoneinfo import ZoneInfo
 import telebot
 from gpiozero import MotionSensor
 from smbus2 import SMBus
@@ -148,7 +149,7 @@ def status_text():
 def ping(m):
     if m.chat.id == CHAT_ID:
         bot.reply_to(m, "✅ Dzialam! Komendy:\n"
-                        "/status /temp /wykres\n"
+                        "/status /temp /wykres /raport\n"
                         "/monitor_on /monitor_off")
 
 @bot.message_handler(commands=["monitor_off"])
@@ -277,9 +278,87 @@ def wykres(m):
     except Exception as e:
         bot.reply_to(m, f"⚠️ Nie udalo sie zrobic wykresu: {e}")
 
+# --- Poranny raport (codziennie o 8:00) ---
+TZ = ZoneInfo("Europe/Warsaw")
+REPORT_HOUR = 8
+NIGHT_HOURS = 10   # raport obejmuje 22:00 -> 8:00
+
+def prom_query(q):
+    qs = urllib.parse.urlencode({"query": q})
+    with urllib.request.urlopen(f"http://localhost:9090/api/v1/query?{qs}", timeout=20) as r:
+        res = json.load(r)["data"]["result"]
+    return float(res[0]["value"][1]) if res else None
+
+def fmt(v, dec=1, unit=" °C"):
+    return "brak danych" if v is None else f"{v:.{dec}f}{unit}"
+
+def morning_report(hours=NIGHT_HOURS):
+    w = f"[{hours}h:1m]"
+    temp = "(room_temperature_celsius > -10 < 50)"   # bez blednych odczytow
+    hum = "(room_humidity_percent >= 0 <= 100)"
+    t_min = prom_query(f"min_over_time({temp}{w})")
+    t_max = prom_query(f"max_over_time({temp}{w})")
+    t_now = prom_query(f"last_over_time({temp}[5m])")
+    h_avg = prom_query(f"avg_over_time({hum}{w})")
+    h_max = prom_query(f"max_over_time({hum}{w})")
+    moves = prom_query(f"sum(increase(motion_events_total[{hours}h]))")
+    moves = round(moves) if moves is not None else None
+
+    start = (datetime.datetime.now(TZ) - datetime.timedelta(hours=hours)).strftime("%H:%M")
+    lines = [
+        "☀️ Dzien dobry!" if hours == NIGHT_HOURS else "📋 Raport",
+        f"Ostatnie {hours} h (od {start})",
+        "",
+        f"🌡 Temperatura: min {fmt(t_min)}, max {fmt(t_max)}",
+        f"     teraz {fmt(t_now)}",
+        f"💧 Wilgotnosc: srednio {fmt(h_avg, 0, ' %')}, max {fmt(h_max, 0, ' %')}",
+    ]
+    if moves is None:
+        lines.append("🚶 Ruch: brak danych")
+    elif moves == 0:
+        lines.append("🚶 Ruch: zero, spokojna noc 😴")
+    else:
+        lines.append(f"🚶 Ruch w pokoju: {moves} razy")
+    if h_max is not None and h_max > 60:
+        lines.append("\n💡 Wysoka wilgotnosc - przewietrz pokoj.")
+    if t_min is not None and t_min < 17:
+        lines.append("\n🥶 W nocy bylo zimno - sprawdz okno albo grzejnik.")
+    return "\n".join(lines)
+
+def report_loop():
+    # co 30 s sprawdzamy godzine; odporne na restarty i synchronizacje zegara
+    last_sent = None
+    while True:
+        now = datetime.datetime.now(TZ)
+        if now.hour == REPORT_HOUR and now.minute < 10 and last_sent != now.date():
+            last_sent = now.date()
+            try:
+                bot.send_message(CHAT_ID, morning_report())
+            except Exception as e:
+                print(f"Blad raportu: {e}", flush=True)
+        time.sleep(30)
+
+@bot.message_handler(commands=["raport"])
+def raport(m):
+    if m.chat.id != CHAT_ID:
+        return
+    # /raport -> ostatnie 10 h, /raport 24 -> ostatnia doba
+    parts = m.text.split()
+    try:
+        hours = int(parts[1]) if len(parts) > 1 else NIGHT_HOURS
+    except ValueError:
+        bot.reply_to(m, "Uzycie: /raport [liczba godzin], np. /raport 24")
+        return
+    hours = max(1, min(hours, 24 * 30))
+    try:
+        bot.reply_to(m, morning_report(hours))
+    except Exception as e:
+        bot.reply_to(m, f"⚠️ Nie udalo sie zrobic raportu: {e}")
+
 # --- Start ---
 start_http_server(8000, addr="127.0.0.1")   # metryki pod http://localhost:8000/metrics
 threading.Thread(target=metrics_loop, daemon=True).start()
+threading.Thread(target=report_loop, daemon=True).start()
 
 bot.send_message(CHAT_ID, "🟢 Bot uruchomiony")
 bot.infinity_polling()
