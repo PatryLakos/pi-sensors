@@ -1,4 +1,6 @@
-import os, time, shutil, subprocess, threading, telebot
+import os, io, json, time, shutil, subprocess, threading, datetime
+import urllib.request, urllib.parse
+import telebot
 from gpiozero import MotionSensor
 from smbus2 import SMBus
 from bmp280 import BMP280
@@ -146,7 +148,7 @@ def status_text():
 def ping(m):
     if m.chat.id == CHAT_ID:
         bot.reply_to(m, "✅ Dzialam! Komendy:\n"
-                        "/status /temp\n"
+                        "/status /temp /wykres\n"
                         "/monitor_on /monitor_off")
 
 @bot.message_handler(commands=["monitor_off"])
@@ -188,6 +190,72 @@ def temp(m):
         bot.reply_to(m, msg)
     except Exception as e:
         bot.reply_to(m, f"⚠️ Blad czujnika: {e}")
+# --- Wykresy na Telegram (/wykres) ---
+CHARTS = [
+    ("Temperatura w pokoju (°C)", "room_temperature_celsius"),
+    ("Wilgotność (%)", "room_humidity_percent"),
+    ("Ciśnienie (hPa)", "room_pressure_hpa"),
+    ("Temperatura CPU (°C)", "pi_cpu_temperature_celsius"),
+]
+
+def prom_range(query, days):
+    end = time.time()
+    start = end - days * 86400
+    step = max(60, int(days * 86400 / 500))   # ok. 500 punktow na wykres
+    qs = urllib.parse.urlencode({"query": query, "start": start, "end": end, "step": step})
+    with urllib.request.urlopen(f"http://localhost:9090/api/v1/query_range?{qs}", timeout=20) as r:
+        res = json.load(r)["data"]["result"]
+    if not res:
+        return [], []
+    vals = res[0]["values"]
+    return ([datetime.datetime.fromtimestamp(float(t)) for t, _ in vals],
+            [float(v) for _, v in vals])
+
+def make_chart(days):
+    # matplotlib ladujemy dopiero przy pierwszym wykresie, zeby oszczedzac RAM
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import matplotlib.dates as mdates
+
+    fig, axes = plt.subplots(len(CHARTS), 1, figsize=(8, 10), sharex=True)
+    for ax, (title, q) in zip(axes, CHARTS):
+        x, y = prom_range(q, days)
+        ax.set_title(title, fontsize=10)
+        ax.grid(alpha=0.3)
+        if x:
+            ax.plot(x, y, linewidth=1.2)
+        else:
+            ax.text(0.5, 0.5, "brak danych", ha="center", va="center", transform=ax.transAxes)
+    fmt = "%H:%M" if days <= 1 else "%d.%m %H:%M"
+    axes[-1].xaxis.set_major_formatter(mdates.DateFormatter(fmt))
+    fig.autofmt_xdate()
+    fig.tight_layout()
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=100)
+    plt.close(fig)
+    buf.seek(0)
+    return buf
+
+@bot.message_handler(commands=["wykres"])
+def wykres(m):
+    if m.chat.id != CHAT_ID:
+        return
+    # /wykres -> 7 dni, /wykres 1 -> ostatnia doba, /wykres 30 -> miesiac
+    parts = m.text.split()
+    try:
+        days = int(parts[1]) if len(parts) > 1 else 7
+    except ValueError:
+        bot.reply_to(m, "Uzycie: /wykres [liczba dni], np. /wykres 1")
+        return
+    days = max(1, min(days, 30))   # Prometheus trzyma 30 dni
+    try:
+        bot.send_chat_action(CHAT_ID, "upload_photo")
+        img = make_chart(days)
+        label = "ostatnia doba" if days == 1 else f"ostatnie {days} dni"
+        bot.send_photo(CHAT_ID, img, caption=f"📈 Pomiary – {label}")
+    except Exception as e:
+        bot.reply_to(m, f"⚠️ Nie udalo sie zrobic wykresu: {e}")
 
 # --- Start ---
 start_http_server(8000, addr="127.0.0.1")   # metryki pod http://localhost:8000/metrics
