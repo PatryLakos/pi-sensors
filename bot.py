@@ -288,7 +288,7 @@ def make_chart(days):
     import matplotlib.dates as mdates
     from matplotlib.ticker import MaxNLocator, AutoMinorLocator, ScalarFormatter
 
-    fig, axes = plt.subplots(len(CHARTS), 1, figsize=(9, 12), sharex=True)
+    fig, axes = plt.subplots(len(CHARTS), 1, figsize=(9, 13), sharex=True)
     for ax, (title, q, unit, step, dec, (lo, hi)) in zip(axes, CHARTS):
         x, y = prom_range(q, days)
         # odrzucamy bledne odczyty (np. 740 hPa), zeby nie psuly skali
@@ -314,8 +314,11 @@ def make_chart(days):
         sf = ScalarFormatter(useOffset=False)
         sf.set_scientific(False)
         ax.yaxis.set_major_formatter(sf)
-    setup_time_axis(axes[-1], days, mdates)
-    fig.autofmt_xdate()
+    # godziny/dni pod kazdym wykresem, nie tylko pod ostatnim
+    for ax in axes:
+        setup_time_axis(ax, days, mdates)
+        ax.tick_params(axis="x", labelbottom=True)
+        plt.setp(ax.get_xticklabels(), rotation=30, ha="right")
     fig.tight_layout()
     buf = io.BytesIO()
     fig.savefig(buf, format="png", dpi=110)
