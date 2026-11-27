@@ -8,6 +8,8 @@ from bmp280 import BMP280
 from bme280 import BME280
 from prometheus_client import Gauge, Counter, start_http_server
 
+TZ = ZoneInfo("Europe/Warsaw")
+
 TOKEN = os.environ["TOKEN"]
 CHAT_ID = int(os.environ["CHAT_ID"])
 bot = telebot.TeleBot(TOKEN)
@@ -241,8 +243,42 @@ def prom_range(query, days):
     if not res:
         return [], []
     vals = res[0]["values"]
-    return ([datetime.datetime.fromtimestamp(float(t)) for t, _ in vals],
+    return ([datetime.datetime.fromtimestamp(float(t), TZ) for t, _ in vals],
             [float(v) for _, v in vals])
+
+DNI = ["pn", "wt", "śr", "czw", "pt", "sob", "nd"]
+
+def setup_time_axis(ax, days, mdates):
+    from matplotlib.ticker import FuncFormatter
+    end = datetime.datetime.now(TZ)
+    ax.set_xlim(end - datetime.timedelta(days=days), end)   # zawsze pelny zakres
+
+    def day_label(x, _pos):
+        d = mdates.num2date(x, tz=TZ)
+        return f"{DNI[d.weekday()]} {d:%d.%m}"
+
+    if days <= 1:
+        # doba: godziny co 3 h, kreski pomocnicze co godzine
+        ax.xaxis.set_major_locator(mdates.HourLocator(byhour=range(0, 24, 3), tz=TZ))
+        ax.xaxis.set_minor_locator(mdates.HourLocator(tz=TZ))
+        ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M", tz=TZ))
+    elif days <= 3:
+        # kilka dni: co 6 h, o polnocy dzien tygodnia i data
+        ax.xaxis.set_major_locator(mdates.HourLocator(byhour=[0, 6, 12, 18], tz=TZ))
+        ax.xaxis.set_minor_locator(mdates.HourLocator(byhour=range(0, 24, 3), tz=TZ))
+        ax.xaxis.set_major_formatter(FuncFormatter(
+            lambda x, p: day_label(x, p) if mdates.num2date(x, tz=TZ).hour == 0
+            else f"{mdates.num2date(x, tz=TZ):%H:%M}"))
+    elif days <= 10:
+        # tydzien: kazdy dzien z nazwa, kreski pomocnicze co 6 h
+        ax.xaxis.set_major_locator(mdates.DayLocator(tz=TZ))
+        ax.xaxis.set_minor_locator(mdates.HourLocator(byhour=[6, 12, 18], tz=TZ))
+        ax.xaxis.set_major_formatter(FuncFormatter(day_label))
+    else:
+        # miesiac: data co kilka dni, kreski pomocnicze co dzien
+        ax.xaxis.set_major_locator(mdates.DayLocator(interval=3 if days <= 20 else 5, tz=TZ))
+        ax.xaxis.set_minor_locator(mdates.DayLocator(tz=TZ))
+        ax.xaxis.set_major_formatter(mdates.DateFormatter("%d.%m", tz=TZ))
 
 def make_chart(days):
     # matplotlib ladujemy dopiero przy pierwszym wykresie, zeby oszczedzac RAM
@@ -278,9 +314,7 @@ def make_chart(days):
         sf = ScalarFormatter(useOffset=False)
         sf.set_scientific(False)
         ax.yaxis.set_major_formatter(sf)
-    fmt = "%H:%M" if days <= 1 else "%d.%m %H:%M"
-    axes[-1].xaxis.set_major_formatter(mdates.DateFormatter(fmt))
-    axes[-1].xaxis.set_minor_locator(AutoMinorLocator(4))
+    setup_time_axis(axes[-1], days, mdates)
     fig.autofmt_xdate()
     fig.tight_layout()
     buf = io.BytesIO()
@@ -310,7 +344,6 @@ def wykres(m):
         bot.reply_to(m, f"⚠️ Nie udalo sie zrobic wykresu: {e}")
 
 # --- Poranny raport (codziennie o 8:00) ---
-TZ = ZoneInfo("Europe/Warsaw")
 REPORT_HOUR = 8
 NIGHT_HOURS = 10   # raport obejmuje 22:00 -> 8:00
 
@@ -422,6 +455,13 @@ def send_weekly():
     img = make_chart(7)
     bot.send_photo(CHAT_ID, img, caption=text)
 
+def notify_error(what, e):
+    # bledy zaplanowanych wiadomosci nie moga ginac po cichu w logach
+    try:
+        bot.send_message(CHAT_ID, f"⚠️ {what} sie nie udal: {e}")
+    except Exception as e2:
+        print(f"Nie udalo sie wyslac bledu: {e2}", flush=True)
+
 def report_loop():
     # co 30 s sprawdzamy godzine; odporne na restarty i synchronizacje zegara
     last_daily = None
@@ -434,6 +474,7 @@ def report_loop():
                 bot.send_message(CHAT_ID, morning_report())
             except Exception as e:
                 print(f"Blad raportu: {e}", flush=True)
+                notify_error("Poranny raport", e)
         if (now.weekday() == WEEKLY_DAY and now.hour == WEEKLY_HOUR
                 and now.minute < 10 and last_weekly != now.date()):
             last_weekly = now.date()
@@ -441,6 +482,7 @@ def report_loop():
                 send_weekly()
             except Exception as e:
                 print(f"Blad podsumowania: {e}", flush=True)
+                notify_error("Podsumowanie tygodnia", e)
         time.sleep(30)
 
 @bot.message_handler(commands=["raport"])
