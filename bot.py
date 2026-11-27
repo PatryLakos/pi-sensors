@@ -1,5 +1,5 @@
 import os, io, json, time, shutil, subprocess, threading, datetime
-import urllib.request, urllib.parse
+import urllib.request, urllib.parse, urllib.error
 from zoneinfo import ZoneInfo
 import telebot
 from gpiozero import MotionSensor
@@ -316,8 +316,13 @@ NIGHT_HOURS = 10   # raport obejmuje 22:00 -> 8:00
 
 def prom_query(q):
     qs = urllib.parse.urlencode({"query": q})
-    with urllib.request.urlopen(f"http://localhost:9090/api/v1/query?{qs}", timeout=20) as r:
-        res = json.load(r)["data"]["result"]
+    try:
+        with urllib.request.urlopen(f"http://localhost:9090/api/v1/query?{qs}", timeout=20) as r:
+            res = json.load(r)["data"]["result"]
+    except urllib.error.HTTPError as e:
+        # pokaz, co dokladnie nie spodobalo sie Prometheusowi
+        detail = json.load(e).get("error", "")
+        raise RuntimeError(f"Prometheus {e.code}: {detail} | zapytanie: {q}") from e
     return float(res[0]["value"][1]) if res else None
 
 def fmt(v, dec=1, unit=" °C"):
@@ -329,7 +334,7 @@ def morning_report(hours=NIGHT_HOURS):
     hum = "(room_humidity_percent >= 0 <= 100)"
     t_min = prom_query(f"min_over_time({temp}{w})")
     t_max = prom_query(f"max_over_time({temp}{w})")
-    t_now = prom_query(f"last_over_time({temp}[5m])")
+    t_now = prom_query(f"last_over_time({temp}[5m:30s])")
     h_avg = prom_query(f"avg_over_time({hum}{w})")
     h_max = prom_query(f"max_over_time({hum}{w})")
     moves = prom_query(f"sum(increase(motion_events_total[{hours}h]))")
